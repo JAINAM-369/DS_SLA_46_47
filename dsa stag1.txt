@@ -1,0 +1,308 @@
+#include <stdio.h>
+#include <string.h>
+
+#define MAX 50            // capacity for pickup priority queue
+#define VEHICLE_COUNT 4   // fixed number of collection vehicles
+
+// structure for a waste pickup request
+typedef struct {
+    int id;
+    int binId;
+    char zone[20];
+    char wasteType[20];
+    int fill;        // bin fill percentage
+    int priority;    // 1 = HIGH, 2 = MEDIUM, 3 = LOW
+} Request;
+
+Request pq[MAX];       // pending requests (priority queue)
+Request history[MAX];  // completed requests
+int size = 0;
+int hSize = 0;
+int nextId = 101;      // auto-generated pickup request id
+
+// circular queue of available vehicles
+char vehicles[VEHICLE_COUNT][5];
+int vFront = 0, vRear = -1, vCount = 0;
+
+// ================= Waste Pickup Requests (Priority Queue) =================
+
+// menu to pick zone (A to F), fills the given string
+void selectZone(char zone[]) {
+    int c;
+    printf("Select Zone:\n");
+    printf("1. Zone A\n2. Zone B\n3. Zone C\n4. Zone D\n5. Zone E\n6. Zone F\n");
+    printf("Enter choice: ");
+    scanf("%d", &c);
+    switch (c) {
+        case 1: strcpy(zone, "zonea"); break;
+        case 2: strcpy(zone, "zoneb"); break;
+        case 3: strcpy(zone, "zonec"); break;
+        case 4: strcpy(zone, "zoned"); break;
+        case 5: strcpy(zone, "zonee"); break;
+        case 6: strcpy(zone, "zonef"); break;
+        default: strcpy(zone, "zonea"); printf("Invalid choice, set to Zone A\n");
+    }
+}
+
+// menu to pick waste type, fills the given string
+void selectWasteType(char type[]) {
+    int c;
+    printf("Select Waste Type:\n");
+    printf("1. Wet Waste\n2. Dry Waste\n3. Recyclable\n4. Hazardous\n");
+    printf("Enter choice: ");
+    scanf("%d", &c);
+    switch (c) {
+        case 1: strcpy(type, "Wet Waste"); break;
+        case 2: strcpy(type, "Dry Waste"); break;
+        case 3: strcpy(type, "Recyclable"); break;
+        case 4: strcpy(type, "Hazardous"); break;
+        default: strcpy(type, "Dry Waste"); printf("Invalid choice, set to Dry Waste\n");
+    }
+}
+
+// bin fill % decides priority of the request
+int getPriority(int fill) {
+    if (fill >= 80) return 1;      // HIGH
+    else if (fill >= 50) return 2; // MEDIUM
+    else return 3;                 // LOW
+}
+
+// convert priority number to readable label
+const char* priorityLabel(int priority) {
+    if (priority == 1) return "HIGH";
+    if (priority == 2) return "MEDIUM";
+    return "LOW";
+}
+
+// insert request in sorted order (lower value = higher priority)
+void insert(int binId, char zone[], char wasteType[], int fill) {
+    if (size == MAX) {
+        printf("Queue is full\n");
+        return;
+    }
+    int priority = getPriority(fill);
+    int id = nextId++;
+    int i = size - 1;
+    // shift lower priority requests right to make space
+    while (i >= 0 && pq[i].priority > priority) {
+        pq[i + 1] = pq[i];
+        i--;
+    }
+    pq[i + 1].id = id;
+    pq[i + 1].binId = binId;
+    strcpy(pq[i + 1].zone, zone);
+    strcpy(pq[i + 1].wasteType, wasteType);
+    pq[i + 1].fill = fill;
+    pq[i + 1].priority = priority;
+    size++;
+    printf("Request %d added with priority %s\n", id, priorityLabel(priority));
+}
+
+// display all pending requests with priority
+void displayPending() {
+    if (size == 0) {
+        printf("No pending requests\n");
+        return;
+    }
+    printf("\n---- Pending Requests ----\n");
+    for (int i = 0; i < size; i++)
+        printf("%d | Bin:%d | %s | %s | Fill:%d%% | Priority:%s\n",
+               pq[i].id, pq[i].binId, pq[i].zone, pq[i].wasteType,
+               pq[i].fill, priorityLabel(pq[i].priority));
+}
+
+// display history of completed requests
+void displayHistory() {
+    if (hSize == 0) {
+        printf("No collection history yet\n");
+        return;
+    }
+    printf("\n---- Recent Collection History ----\n");
+    for (int i = 0; i < hSize; i++)
+        printf("%d | Bin:%d | %s | %s | Fill:%d%%\n",
+               history[i].id, history[i].binId, history[i].zone,
+               history[i].wasteType, history[i].fill);
+}
+
+// ================= Vehicle Queue (Circular Queue) =================
+
+int isVehicleEmpty() {
+    return vCount == 0;
+}
+
+int isVehicleFull() {
+    return vCount == VEHICLE_COUNT;
+}
+
+// add a vehicle to the rear of the queue
+void enqueueVehicle(char name[]) {
+    if (isVehicleFull()) {
+        printf("Vehicle queue is full\n");
+        return;
+    }
+    vRear = (vRear + 1) % VEHICLE_COUNT;
+    strcpy(vehicles[vRear], name);
+    vCount++;
+}
+
+// assign/remove the vehicle at the front, copies its name into out
+// returns 1 on success, 0 if no vehicle was available
+int dequeueVehicle(char out[]) {
+    if (isVehicleEmpty()) {
+        return 0;
+    }
+    strcpy(out, vehicles[vFront]);
+    vFront = (vFront + 1) % VEHICLE_COUNT;
+    vCount--;
+    return 1;
+}
+
+// show current order of available vehicles, front to rear
+void displayVehicles() {
+    if (isVehicleEmpty()) {
+        printf("No vehicles available right now\n");
+        return;
+    }
+    printf("\n---- Available Vehicles ----\n");
+    int i = vFront;
+    for (int c = 0; c < vCount; c++) {
+        printf("%s", vehicles[i]);
+        if (c != vCount - 1) printf(" -> ");
+        i = (i + 1) % VEHICLE_COUNT;
+    }
+    printf("\n");
+}
+
+// serve the highest priority request: assign a vehicle, complete pickup,
+// move request to history, and return the vehicle to the rear of the queue
+void deleteRequest() {
+    if (size == 0) {
+        printf("Queue is empty\n");
+        return;
+    }
+
+    char vehicle[5];
+    dequeueVehicle(vehicle);
+
+    printf("\nServing Request -> ID: %d, Bin: %d, Zone: %s, Priority: %s\n",
+           pq[0].id, pq[0].binId, pq[0].zone,
+           priorityLabel(pq[0].priority));
+
+    printf("Vehicle %s assigned for pickup\n", vehicle);
+    printf("Bin %d picked up successfully.\n", pq[0].binId);
+
+    if (hSize < MAX)
+        history[hSize++] = pq[0];
+
+    for (int i = 0; i < size - 1; i++)
+        pq[i] = pq[i + 1];
+
+    size--;
+
+    enqueueVehicle(vehicle);
+}
+
+// ================= Menus =================
+
+// submenu for waste pickup requests
+void pickupMenu() {
+    int choice, binId, fill;
+    char zone[20], wasteType[20];
+
+    while (1) {
+        printf("\n--- Waste Pickup Request ---\n");
+        printf("1. Add Bin Request\n2. Collect Bin (Serve)\n3. Display Pending Requests\n");
+        printf("4. Display Collection History\n5. Back to Main Menu\n");
+        printf("Enter choice: ");
+        scanf("%d", &choice);
+
+        switch (choice) {
+            case 1:
+                printf("Enter Bin ID: ");
+                scanf("%d", &binId);
+                selectZone(zone);
+                selectWasteType(wasteType);
+                printf("Enter Bin Fill Percentage: ");
+                scanf("%d", &fill);
+                // keep asking until a valid fill percentage (0-100) is entered
+                while (fill > 100 || fill < 0) {
+                    printf("Error: Fill must be between 0 and 100. Enter again: ");
+                    scanf("%d", &fill);
+                }
+                insert(binId, zone, wasteType, fill);
+                break;
+            case 2:
+                deleteRequest();
+                break;
+            case 3:
+                displayPending();
+                break;
+            case 4:
+                displayHistory();
+                break;
+            case 5:
+                return; // back to main menu
+            default:
+                printf("Invalid choice\n");
+        }
+    }
+}
+
+// submenu to view vehicle queue status (assignment/return is automatic)
+void vehicleMenu() {
+    int choice;
+
+    while (1) {
+        printf("\n--- Vehicle request ---\n");
+        printf("1. Display Available Vehicles\n2. View Vehicle Availability\n3. Back to Main Menu\n");
+        printf("Enter choice: ");
+        scanf("%d", &choice);
+
+        switch (choice) {
+            case 1:
+            displayVehicles();
+            break;
+            case 2:
+            printf("Available Vehicles: %d/%d\n", vCount, VEHICLE_COUNT);
+            break;
+            case 3:
+            return; // back to main menu
+            default:
+            printf("Invalid choice\n");
+        }
+    }
+}
+
+int main() {
+    // set up fixed collection vehicles: V1, V2, V3, V4
+    for (int i = 1; i <= VEHICLE_COUNT; i++) {
+        char name[5];
+        sprintf(name, "V%d", i);
+        enqueueVehicle(name);
+    }
+
+    int choice;
+    while (1) {
+        printf("\n===== Waste Collection Management System =====\n");
+        printf("1. Waste Pickup Requests\n");
+        printf("2. Vehicle Queue\n");
+        printf("3. Exit\n");
+        printf("Enter choice: ");
+        scanf("%d", &choice);
+
+        switch (choice) {
+            case 1:
+                pickupMenu();
+                break;
+            case 2:
+                vehicleMenu();
+                break;
+            case 3:
+                printf("Exiting...\n");
+                return 0;
+            default:
+                printf("Invalid choice\n");
+        }
+    }
+    return 0;
+}

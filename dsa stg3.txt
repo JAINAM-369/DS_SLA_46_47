@@ -1,0 +1,711 @@
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h> // NEW: Required for malloc
+
+#define MAX 50            // capacity for pickup priority queue
+#define VEHICLE_COUNT 4   // fixed number of collection vehicles
+#define HASH_SIZE 10      // NEW: hash table size for collection centers
+
+// structure for a waste pickup request
+typedef struct {
+    int id;
+    int binId;
+    int centerId;          // Collection center assigned by the user
+    char zone[20];
+    char wasteType[20];
+    int fill;        // bin fill percentage
+    int priority;    // 1 = HIGH, 2 = MEDIUM, 3 = LOW
+    int severity;    // NEW: Danger level of the waste (1-100)
+} Request;
+
+Request pq[MAX];       // pending requests (priority queue)
+// Request history[MAX]; // REMOVED: Replaced by Doubly Linked List
+int size = 0;
+// int hSize = 0;        // REMOVED: Replaced by Doubly Linked List
+int nextId = 101;      // auto-generated pickup request id
+
+// ================= NEW: Doubly Linked List (Collected Item Records) =================
+
+// Structure for Doubly Linked List node
+typedef struct DLLNode {
+    int id;
+    int binId;
+    int centerId;          // Collection center that collected this bin
+    char zone[20];
+    char wasteType[20];
+    int fill;
+    int priority;
+    int severity;
+    struct DLLNode *prev;
+    struct DLLNode *next;
+} DLLNode;
+
+DLLNode *head = NULL;
+DLLNode *tail = NULL;
+
+const char* priorityLabel(int priority); // Forward declaration
+
+// Add successfully collected request to the end of the DLL
+void addCollectedRecord(Request r) {
+    DLLNode *newNode = (DLLNode *)malloc(sizeof(DLLNode));
+    if (newNode == NULL) {
+        printf("Memory allocation failed.\n");
+        return;
+    }
+
+    newNode->id = r.id;
+    newNode->binId = r.binId;
+    newNode->centerId = r.centerId;
+    strcpy(newNode->zone, r.zone);
+    strcpy(newNode->wasteType, r.wasteType);
+    newNode->fill = r.fill;
+    newNode->priority = r.priority;
+    newNode->severity = r.severity;
+    newNode->next = NULL;
+    newNode->prev = tail;
+
+    if (tail == NULL) {
+        head = newNode;
+    } else {
+        tail->next = newNode;
+    }
+    tail = newNode;
+}
+
+// Display all collected records from head to tail
+void displayCollectedForward() {
+    if (head == NULL) {
+        printf("No collected records yet.\n");
+        return;
+    }
+    
+    printf("\n---- Collected Records (Forward) ----\n");
+    DLLNode *temp = head;
+    while (temp != NULL) {
+        printf("ID:%d | Bin:%d | Center:%d | Type:%s | Fill:%d%% | Severity:%d\n",
+               temp->id, temp->binId, temp->centerId, temp->wasteType, temp->fill, temp->severity);
+        temp = temp->next;
+    }
+}
+
+// Display all collected records from tail to head
+void displayCollectedReverse() {
+    if (tail == NULL) {
+        printf("No collected records yet.\n");
+        return;
+    }
+
+    printf("\n---- Collected Records (Reverse) ----\n");
+    DLLNode *temp = tail;
+    while (temp != NULL) {
+        printf("ID:%d | Bin:%d | Center:%d | Type:%s | Fill:%d%% | Severity:%d\n",
+               temp->id, temp->binId, temp->centerId, temp->wasteType, temp->fill, temp->severity);
+        temp = temp->prev;
+    }
+}
+
+// ================= NEW: BST (Severity Index Classification) =================
+
+// Structure for Binary Search Tree node
+typedef struct BSTNode {
+    int severity;
+    int binId;
+    char wasteType[20];
+    struct BSTNode *left;
+    struct BSTNode *right;
+} BSTNode;
+
+BSTNode *severityRoot = NULL;
+
+// Insert successfully collected bin into BST organized by severity score
+BSTNode* insertSeverityBST(BSTNode *root, Request r) {
+    if (root == NULL) {
+        BSTNode *newNode = (BSTNode *)malloc(sizeof(BSTNode));
+        newNode->severity = r.severity;
+        newNode->binId = r.binId;
+        strcpy(newNode->wasteType, r.wasteType);
+        newNode->left = NULL;
+        newNode->right = NULL;
+        return newNode;
+    }
+
+    // Lower severity to the left, higher or equal to the right
+    if (r.severity < root->severity) {
+        root->left = insertSeverityBST(root->left, r);
+    } else {
+        root->right = insertSeverityBST(root->right, r);
+    }
+    return root;
+}
+
+// Inorder traversal to display all collected bins from Safest to Most Dangerous
+void displaySeverityBST(BSTNode *root) {
+    if (root != NULL) {
+        displaySeverityBST(root->left);
+        printf("Severity: %d | Waste: %s | Bin: %d\n", 
+               root->severity, root->wasteType, root->binId);
+        displaySeverityBST(root->right);
+    }
+}
+
+// Find the maximum node in the BST (Right-most node)
+void findMostHazardous(BSTNode *root) {
+    if (root == NULL) {
+        printf("No waste collected yet.\n");
+        return;
+    }
+    BSTNode *temp = root;
+    while (temp->right != NULL) {
+        temp = temp->right;
+    }
+    printf("\n--- Most Hazardous Waste Collected ---\n");
+    printf("Severity: %d | Type: %s | Bin: %d\n", temp->severity, temp->wasteType, temp->binId);
+}
+
+// Find the minimum node in the BST (Left-most node)
+void findSafest(BSTNode *root) {
+    if (root == NULL) {
+        printf("No waste collected yet.\n");
+        return;
+    }
+    BSTNode *temp = root;
+    while (temp->left != NULL) {
+        temp = temp->left;
+    }
+    printf("\n--- Safest Waste Collected ---\n");
+    printf("Severity: %d | Type: %s | Bin: %d\n", temp->severity, temp->wasteType, temp->binId);
+}
+
+// ================= NEW: Hash Table (Collection Center Search) =================
+
+// Structure for Collection Center node (with separate chaining)
+typedef struct CollectionCenter {
+    int centerId;
+    char name[50];
+    char zone[20];
+    struct CollectionCenter *next;
+} CollectionCenter;
+
+CollectionCenter *centerTable[HASH_SIZE] = {NULL};
+
+// Calculate the hash index for a given center ID
+int centerHash(int centerId) {
+    int index = centerId % HASH_SIZE;
+    if (index < 0) {
+        index += HASH_SIZE;
+    }
+    return index;
+}
+
+// Add a collection center to the hash table using separate chaining
+void addCollectionCenter(int centerId, const char name[], const char zone[]) {
+    int index = centerHash(centerId);
+
+    // Check for duplicate center ID in the chain before allocating memory
+    CollectionCenter *temp = centerTable[index];
+    while (temp != NULL) {
+        if (temp->centerId == centerId) {
+            printf("Collection Center with ID %d already exists.\n", centerId);
+            return;
+        }
+        temp = temp->next;
+    }
+
+    CollectionCenter *newNode = (CollectionCenter *)malloc(sizeof(CollectionCenter));
+    if (newNode == NULL) {
+        printf("Memory allocation failed.\n");
+        return;
+    }
+
+    newNode->centerId = centerId;
+    strncpy(newNode->name, name, sizeof(newNode->name) - 1);
+    newNode->name[sizeof(newNode->name) - 1] = '\0';
+    strncpy(newNode->zone, zone, sizeof(newNode->zone) - 1);
+    newNode->zone[sizeof(newNode->zone) - 1] = '\0';
+    newNode->next = NULL;
+
+    // Insert at the end of the linked list at centerTable[index]
+    if (centerTable[index] == NULL) {
+        centerTable[index] = newNode;
+    } else {
+        temp = centerTable[index];
+        while (temp->next != NULL) {
+            temp = temp->next;
+        }
+        temp->next = newNode;
+    }
+}
+
+// Search for a collection center in the hash table using its ID
+void searchCollectionCenterById(int centerId) {
+    int index = centerHash(centerId);
+    CollectionCenter *temp = centerTable[index];
+
+    while (temp != NULL) {
+        if (temp->centerId == centerId) {
+            int pendingCount = 0;
+            int collectedCount = 0;
+
+            // Count only pending requests assigned to this exact center.
+            for (int i = 0; i < size; i++) {
+                if (pq[i].centerId == centerId) {
+                    pendingCount++;
+                }
+            }
+
+            // Count only collected records assigned to this exact center.
+            DLLNode *record = head;
+            while (record != NULL) {
+                if (record->centerId == centerId) {
+                    collectedCount++;
+                }
+                record = record->next;
+            }
+
+            printf("\n--- Collection Center Found ---\n");
+            printf("Center ID: %d\n", temp->centerId);
+            printf("Name: %s\n", temp->name);
+            printf("Zone: %s\n", temp->zone);
+            printf("Pending Bins: %d\n", pendingCount);
+            printf("Collected Bins: %d\n", collectedCount);
+            return;
+        }
+        temp = temp->next;
+    }
+
+    printf("Collection center not found.\n");
+}
+
+// Initialize hash table with sample collection centers
+void initializeCollectionCenters() {
+    addCollectionCenter(201, "North Hub Collection Center", "Zone A");
+    addCollectionCenter(202, "East Valley Collection Center", "Zone B");
+    addCollectionCenter(203, "Central Metro Collection Center", "Zone C");
+    addCollectionCenter(204, "South Park Collection Center", "Zone D");
+    addCollectionCenter(205, "West Industrial Collection Center", "Zone E");
+    addCollectionCenter(206, "Harbor View Collection Center", "Zone F");
+    addCollectionCenter(211, "North Annex Collection Center", "Zone A"); // Shares hash index 1 with ID 201
+}
+
+// Free dynamically allocated hash table nodes
+void freeCollectionCenters() {
+    for (int i = 0; i < HASH_SIZE; i++) {
+        CollectionCenter *temp = centerTable[i];
+        while (temp != NULL) {
+            CollectionCenter *next = temp->next;
+            free(temp);
+            temp = next;
+        }
+        centerTable[i] = NULL;
+    }
+}
+
+// Display collection centers that belong to the selected zone.
+void displayCentersByZone(const char zone[]) {
+    int found = 0;
+    printf("\nCollection centers available in %s:\n", zone);
+
+    for (int i = 0; i < HASH_SIZE; i++) {
+        CollectionCenter *temp = centerTable[i];
+        while (temp != NULL) {
+            if (strcmp(temp->zone, zone) == 0) {
+                printf("Center ID: %d | Name: %s\n", temp->centerId, temp->name);
+                found = 1;
+            }
+            temp = temp->next;
+        }
+    }
+
+    if (!found) {
+        printf("No collection centers are registered for this zone.\n");
+    }
+}
+
+// Ask the user to choose a valid collection center in the selected zone.
+int selectCenterForZone(const char zone[]) {
+    int centerId;
+
+    while (1) {
+        displayCentersByZone(zone);
+        printf("Enter Collection Center ID: ");
+        if (scanf("%d", &centerId) != 1) {
+            int ch;
+            while ((ch = getchar()) != '\n' && ch != EOF) { }
+            printf("Invalid input. Please enter a numeric center ID.\n");
+            continue;
+        }
+
+        int index = centerHash(centerId);
+        CollectionCenter *temp = centerTable[index];
+        while (temp != NULL) {
+            if (temp->centerId == centerId && strcmp(temp->zone, zone) == 0) {
+                return centerId;
+            }
+            temp = temp->next;
+        }
+
+        printf("Invalid center ID for %s. Please choose a center listed for this zone.\n", zone);
+    }
+}
+
+// circular queue of available vehicles
+char vehicles[VEHICLE_COUNT][5];
+int vFront = 0, vRear = -1, vCount = 0;
+
+// ================= Waste Pickup Requests (Priority Queue) =================
+
+// menu to pick zone (A to F), fills the given string
+void selectZone(char zone[]) {
+    int c;
+    printf("Select Zone:\n");
+    printf("1. Zone A\n2. Zone B\n3. Zone C\n4. Zone D\n5. Zone E\n6. Zone F\n");
+    printf("Enter choice: ");
+    scanf("%d", &c);
+    switch (c) {
+        case 1: strcpy(zone, "Zone A"); break;
+        case 2: strcpy(zone, "Zone B"); break;
+        case 3: strcpy(zone, "Zone C"); break;
+        case 4: strcpy(zone, "Zone D"); break;
+        case 5: strcpy(zone, "Zone E"); break;
+        case 6: strcpy(zone, "Zone F"); break;
+        default: strcpy(zone, "Zone A"); printf("Invalid choice, set to Zone A\n");
+    }
+}
+
+// menu to pick waste type, fills the given string
+// NEW: modified to also assign a severity score based on the selection
+void selectWasteType(char type[], int *severity) {
+    int c;
+    printf("Select Waste Type:\n");
+    printf("1. Wet Waste\n2. Dry Waste\n3. Recyclable\n4. Hazardous\n");
+    printf("Enter choice: ");
+    scanf("%d", &c);
+    switch (c) {
+        case 1: strcpy(type, "Wet Waste"); *severity = 50; break;
+        case 2: strcpy(type, "Dry Waste"); *severity = 20; break;
+        case 3: strcpy(type, "Recyclable"); *severity = 10; break;
+        case 4: strcpy(type, "Hazardous"); *severity = 95; break;
+        default: strcpy(type, "Dry Waste"); *severity = 20; printf("Invalid choice, set to Dry Waste\n");
+    }
+}
+
+// bin fill % decides priority of the request
+int getPriority(int fill) {
+    if (fill >= 80) return 1;      // HIGH
+    else if (fill >= 50) return 2; // MEDIUM
+    else return 3;                 // LOW
+}
+
+// convert priority number to readable label
+const char* priorityLabel(int priority) {
+    if (priority == 1) return "HIGH";
+    if (priority == 2) return "MEDIUM";
+    return "LOW";
+}
+
+// insert request in sorted order (lower value = higher priority)
+// NEW: added severity parameter
+void insert(int binId, int centerId, char zone[], char wasteType[], int fill, int severity) {
+    if (size == MAX) {
+        printf("Queue is full\n");
+        return;
+    }
+    int priority = getPriority(fill);
+    int id = nextId++;
+    int i = size - 1;
+    // shift lower priority requests right to make space
+    while (i >= 0 && pq[i].priority > priority) {
+        pq[i + 1] = pq[i];
+        i--;
+    }
+    pq[i + 1].id = id;
+    pq[i + 1].binId = binId;
+    pq[i + 1].centerId = centerId;
+    strcpy(pq[i + 1].zone, zone);
+    strcpy(pq[i + 1].wasteType, wasteType);
+    pq[i + 1].fill = fill;
+    pq[i + 1].priority = priority;
+    pq[i + 1].severity = severity; // NEW: store severity
+    size++;
+    printf("Request %d added with priority %s\n", id, priorityLabel(priority));
+}
+
+// display all pending requests with priority
+void displayPending() {
+    if (size == 0) {
+        printf("No pending requests\n");
+        return;
+    }
+    printf("\n---- Pending Requests ----\n");
+    for (int i = 0; i < size; i++)
+        printf("%d | Bin:%d | Zone:%s | Center:%d | %s | Fill:%d%% | Priority:%s\n",
+               pq[i].id, pq[i].binId, pq[i].zone, pq[i].centerId, pq[i].wasteType,
+               pq[i].fill, priorityLabel(pq[i].priority));
+}
+
+// ================= Vehicle Queue (Circular Queue) =================
+
+int isVehicleEmpty() {
+    return vCount == 0;
+}
+
+int isVehicleFull() {
+    return vCount == VEHICLE_COUNT;
+}
+
+// add a vehicle to the rear of the queue
+void enqueueVehicle(char name[]) {
+    if (isVehicleFull()) {
+        printf("Vehicle queue is full\n");
+        return;
+    }
+    vRear = (vRear + 1) % VEHICLE_COUNT;
+    strcpy(vehicles[vRear], name);
+    vCount++;
+}
+
+// assign/remove the vehicle at the front, copies its name into out
+// returns 1 on success, 0 if no vehicle was available
+int dequeueVehicle(char out[]) {
+    if (isVehicleEmpty()) {
+        return 0;
+    }
+    strcpy(out, vehicles[vFront]);
+    vFront = (vFront + 1) % VEHICLE_COUNT;
+    vCount--;
+    return 1;
+}
+
+// show current order of available vehicles, front to rear
+void displayVehicles() {
+    if (isVehicleEmpty()) {
+        printf("No vehicles available right now\n");
+        return;
+    }
+    printf("\n---- Available Vehicles ----\n");
+    int i = vFront;
+    for (int c = 0; c < vCount; c++) {
+        printf("%s", vehicles[i]);
+        if (c != vCount - 1) printf(" -> ");
+        i = (i + 1) % VEHICLE_COUNT;
+    }
+    printf("\n");
+}
+
+// serve the highest priority request: assign a vehicle, complete pickup,
+// move request to history, and return the vehicle to the rear of the queue
+void deleteRequest() {
+    if (size == 0) {
+        printf("Queue is empty\n");
+        return;
+    }
+
+    char vehicle[5];
+    
+    // NEW: Check if vehicle was successfully dequeued to avoid bugs
+    if (dequeueVehicle(vehicle) == 0) {
+        printf("No vehicles available right now. Pickup delayed.\n");
+        return;
+    }
+
+    printf("\nServing Request -> ID: %d, Bin: %d, Zone: %s, Center: %d, Priority: %s\n",
+           pq[0].id, pq[0].binId, pq[0].zone, pq[0].centerId,
+           priorityLabel(pq[0].priority));
+
+    printf("Vehicle %s assigned for pickup\n", vehicle);
+    printf("Bin %d picked up successfully.\n", pq[0].binId);
+
+    // NEW: Add to Doubly Linked List History instead of array
+    addCollectedRecord(pq[0]);
+
+    // NEW: Categorize by Severity Index in BST
+    severityRoot = insertSeverityBST(severityRoot, pq[0]);
+
+    for (int i = 0; i < size - 1; i++)
+        pq[i] = pq[i + 1];
+
+    size--;
+
+    enqueueVehicle(vehicle);
+}
+
+// ================= Menus =================
+
+// submenu for waste pickup requests
+void pickupMenu() {
+    int choice, binId, centerId, fill, severity; // centerId records the user-selected collection center
+    char zone[20], wasteType[20];
+
+    while (1) {
+        printf("\n--- Waste Pickup Request ---\n");
+        printf("1. Add Bin Request\n2. Collect Bin (Serve)\n3. Display Pending Requests\n");
+        printf("4. Back to Main Menu\n"); // CHANGED: Removed display history here to avoid redundancy
+        printf("Enter choice: ");
+        scanf("%d", &choice);
+
+        switch (choice) {
+            case 1:
+                printf("Enter Bin ID: ");
+                scanf("%d", &binId);
+                selectZone(zone);
+                centerId = selectCenterForZone(zone);
+                selectWasteType(wasteType, &severity); // NEW: pass severity address
+                printf("Enter Bin Fill Percentage: ");
+                scanf("%d", &fill);
+                // keep asking until a valid fill percentage (0-100) is entered
+                while (fill > 100 || fill < 0) {
+                    printf("Error: Fill must be between 0 and 100. Enter again: ");
+                    scanf("%d", &fill);
+                }
+                insert(binId, centerId, zone, wasteType, fill, severity); // store selected center and severity
+                break;
+            case 2:
+                deleteRequest();
+                break;
+            case 3:
+                displayPending();
+                break;
+            case 4:
+                return; // back to main menu
+            default:
+                printf("Invalid choice\n");
+        }
+    }
+}
+
+// submenu to view vehicle queue status (assignment/return is automatic)
+void vehicleMenu() {
+    int choice;
+
+    while (1) {
+        printf("\n--- Vehicle request ---\n");
+        printf("1. Display Available Vehicles\n2. View Vehicle Availability\n3. Back to Main Menu\n");
+        printf("Enter choice: ");
+        scanf("%d", &choice);
+
+        switch (choice) {
+            case 1:
+            displayVehicles();
+            break;
+            case 2:
+            printf("Available Vehicles: %d/%d\n", vCount, VEHICLE_COUNT);
+            break;
+            case 3:
+            return; // back to main menu
+            default:
+            printf("Invalid choice\n");
+        }
+    }
+}
+
+// NEW: submenu for viewing Doubly Linked List records
+void collectedRecordsMenu() {
+    int choice;
+    while (1) {
+        printf("\n--- Collected Item Records ---\n");
+        printf("1. Display Records Forward\n2. Display Records Reverse\n3. Back to Main Menu\n");
+        printf("Enter choice: ");
+        scanf("%d", &choice);
+        switch (choice) {
+            case 1: displayCollectedForward(); break;
+            case 2: displayCollectedReverse(); break;
+            case 3: return;
+            default: printf("Invalid choice\n");
+        }
+    }
+}
+
+// NEW: submenu for viewing Severity Index (BST)
+void severityBstMenu() {
+    int choice;
+    while (1) {
+        printf("\n--- Severity Index Classification ---\n");
+        printf("1. Display All Bins (Safest to Most Dangerous)\n");
+        printf("2. Find Most Hazardous Waste Collected\n");
+        printf("3. Find Safest Waste Collected\n");
+        printf("4. Back to Main Menu\n");
+        printf("Enter choice: ");
+        scanf("%d", &choice);
+
+        switch (choice) {
+            case 1:
+                printf("\n---- Collected Bins by Severity Index ----\n\n");
+                if (severityRoot == NULL) printf("No waste collected yet.\n");
+                else displaySeverityBST(severityRoot);
+                break;
+            case 2:
+                findMostHazardous(severityRoot);
+                break;
+            case 3:
+                findSafest(severityRoot);
+                break;
+            case 4:
+                return;
+            default:
+                printf("Invalid choice\n");
+        }
+    }
+}
+
+int main() {
+    // set up fixed collection vehicles: V1, V2, V3, V4
+    for (int i = 1; i <= VEHICLE_COUNT; i++) {
+        char name[5];
+        sprintf(name, "V%d", i);
+        enqueueVehicle(name);
+    }
+
+    initializeCollectionCenters(); // NEW: initialize hash table with sample collection centers
+
+    int choice;
+    while (1) {
+        printf("\n===== Waste Collection Management System =====\n");
+        printf("1. Waste Pickup Requests (Priority Queue)\n");
+        printf("2. Vehicle Queue (Circular Queue)\n");
+        printf("3. Collected Item Records (Doubly Linked List)\n");   // NEW
+        printf("4. Severity Index Classification (BST)\n");         // NEW
+        printf("5. Exit\n");
+        printf("6. Search Collection Center by ID (Hash Table)\n"); // NEW
+        printf("Enter choice: ");
+        if (scanf("%d", &choice) != 1) {
+            int ch;
+            while ((ch = getchar()) != '\n' && ch != EOF);
+            printf("Invalid choice\n");
+            continue;
+        }
+
+        switch (choice) {
+            case 1:
+                pickupMenu();
+                break;
+            case 2:
+                vehicleMenu();
+                break;
+            case 3:
+                collectedRecordsMenu();  // NEW
+                break;
+            case 4:
+                severityBstMenu();       // NEW
+                break;
+            case 5:
+                freeCollectionCenters();
+                printf("Exiting...\n");
+                return 0;
+            case 6: {
+                int centerId;
+                printf("Enter Collection Center ID: ");
+                if (scanf("%d", &centerId) != 1 || centerId <= 0) {
+                    int ch;
+                    while ((ch = getchar()) != '\n' && ch != EOF);
+                    printf("Invalid Center ID. Please enter a positive integer.\n");
+                } else {
+                    searchCollectionCenterById(centerId);
+                }
+                break;
+            }
+            default:
+                printf("Invalid choice\n");
+        }
+    }
+    return 0;
+}
